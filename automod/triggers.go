@@ -121,7 +121,7 @@ func (alc *AnyLinkTrigger) UserSettings() []*SettingDef {
 	return []*SettingDef{}
 }
 
-var LinkRegex = regexp.MustCompile(`((https?|steam):\/\/[^\s<]+[^<.,:;"')\]\s])`)
+var LinkRegex = regexp.MustCompile(`(http(s)?:\/\/.)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=]*)`)
 
 func (alc *AnyLinkTrigger) CheckMessage(ms *dstate.MemberState, cs *dstate.ChannelState, m *discordgo.Message, stripped string, data interface{}) (bool, error) {
 	if LinkRegex.MatchString(m.Content) {
@@ -286,6 +286,10 @@ func (dt *DomainTrigger) CheckMessage(ms *dstate.MemberState, cs *dstate.Channel
 }
 
 func (dt *DomainTrigger) containsDomain(link string, list []string) (bool, string) {
+	if !strings.HasPrefix(link, "http://") || !strings.HasPrefix(link, "http://") {
+		link = "http://" + link
+	}
+
 	parsed, err := url.ParseRequestURI(link)
 	if err != nil {
 		logrus.WithError(err).WithField("url", link).Error("Failed parsing request url matched with regex")
@@ -859,7 +863,8 @@ func (r *MessageRegexTrigger) CheckMessage(ms *dstate.MemberState, cs *dstate.Ch
 /////////////////////////////////////////////////////////////
 
 type SpamTriggerData struct {
-	Treshold int
+	Treshold  int
+	TimeLimit int
 }
 
 var _ MessageTrigger = (*SpamTrigger)(nil)
@@ -892,14 +897,26 @@ func (spam *SpamTrigger) UserSettings() []*SettingDef {
 			Max:     250,
 			Default: 4,
 		},
+		&SettingDef{
+			Name:    "Within seconds (0 = infinity)",
+			Key:     "TimeLimit",
+			Kind:    SettingTypeInt,
+			Min:     0,
+			Max:     10000,
+			Default: 30,
+		},
 	}
 }
 
 func (spam *SpamTrigger) CheckMessage(ms *dstate.MemberState, cs *dstate.ChannelState, m *discordgo.Message, mdStripped string, data interface{}) (bool, error) {
 
+	settingsCast := data.(*SpamTriggerData)
+
 	mToCheckAgainst := strings.TrimSpace(strings.ToLower(m.Content))
 
 	count := 1
+
+	timeLimit := time.Now().Add(-time.Second * time.Duration(settingsCast.TimeLimit))
 
 	cs.Owner.RLock()
 	for i := len(cs.Messages) - 1; i >= 0; i-- {
@@ -913,6 +930,11 @@ func (spam *SpamTrigger) CheckMessage(ms *dstate.MemberState, cs *dstate.Channel
 			continue
 		}
 
+		if settingsCast.TimeLimit > 0 && timeLimit.After(cMsg.ParsedCreated) {
+			// if this message was created before the time limit, then break out
+			break
+		}
+
 		if len(cMsg.Message.Attachments) > 0 {
 			break // treat any attachment as a different message, in the future i may download them and check hash or something? maybe too much
 		}
@@ -923,9 +945,10 @@ func (spam *SpamTrigger) CheckMessage(ms *dstate.MemberState, cs *dstate.Channel
 			break
 		}
 	}
-	defer cs.Owner.RUnlock()
 
-	if count >= data.(*SpamTriggerData).Treshold {
+	cs.Owner.RUnlock()
+
+	if count >= settingsCast.Treshold {
 		return true, nil
 	}
 
